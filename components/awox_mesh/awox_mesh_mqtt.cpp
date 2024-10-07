@@ -39,7 +39,7 @@ void AwoxMeshMqtt::setup() {
         if (std::regex_match(topic, std::regex(global_mqtt_client->get_topic_prefix() + "/[0-9]+/availability"))) {
           ESP_LOGD(TAG, "Received topic: %s, %s", topic.c_str(), payload.c_str());
           if (payload == "online") {
-            global_mqtt_client->publish(topic.c_str(), "offline", 2, true);
+            global_mqtt_client->publish(topic.c_str(), "offline", 2);
           }
         }
       }, 2);
@@ -71,7 +71,7 @@ void AwoxMeshMqtt::publish_connected(int active_connections, int online_devices,
     const std::string message = active_connections > 0 ? "online" : "offline";
     ESP_LOGI(TAG, "Publish mesh connection status: %s", message.c_str());
 
-    global_mqtt_client->publish(global_mqtt_client->get_topic_prefix() + "/connected", message, 2);
+    global_mqtt_client->publish(global_mqtt_client->get_topic_prefix() + "/connected", message, 2, true);
   }
 
   if (this->last_published_active_connections_ == active_connections &&
