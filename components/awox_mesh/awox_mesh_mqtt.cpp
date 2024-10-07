@@ -39,10 +39,10 @@ void AwoxMeshMqtt::setup() {
         if (std::regex_match(topic, std::regex(global_mqtt_client->get_topic_prefix() + "/[0-9]+/availability"))) {
           ESP_LOGD(TAG, "Received topic: %s, %s", topic.c_str(), payload.c_str());
           if (payload == "online") {
-            global_mqtt_client->publish(topic.c_str(), "offline");
+            global_mqtt_client->publish(topic.c_str(), "offline", 2, true);
           }
         }
-      });
+      }, 2);
 }
 
 std::string AwoxMeshMqtt::get_discovery_topic_(const MQTTDiscoveryInfo &discovery_info, Device *device) const {
@@ -71,7 +71,7 @@ void AwoxMeshMqtt::publish_connected(int active_connections, int online_devices,
     const std::string message = active_connections > 0 ? "online" : "offline";
     ESP_LOGI(TAG, "Publish mesh connection status: %s", message.c_str());
 
-    global_mqtt_client->publish(global_mqtt_client->get_topic_prefix() + "/connected", message, 0, true);
+    global_mqtt_client->publish(global_mqtt_client->get_topic_prefix() + "/connected", message, 2);
   }
 
   if (this->last_published_active_connections_ == active_connections &&
@@ -103,7 +103,7 @@ void AwoxMeshMqtt::publish_connected(int active_connections, int online_devices,
           connection["mesh_ids"] = mesh_ids.str().substr(0, mesh_ids.str().size() - 2);
         }
       },
-      0, false);
+      2, false);
 }
 
 void AwoxMeshMqtt::publish_availability(Device *device) {
@@ -115,7 +115,7 @@ void AwoxMeshMqtt::publish_availability(Device *device) {
 
   const std::string message = device->online ? "online" : "offline";
   ESP_LOGI(TAG, "Publish online/offline for %d - %s", device->mesh_id, message.c_str());
-  global_mqtt_client->publish(this->get_mqtt_topic_for_(device, "availability"), message, 0, true);
+  global_mqtt_client->publish(this->get_mqtt_topic_for_(device, "availability"), message, 2, true);
 }
 
 void AwoxMeshMqtt::publish_availability(Group *group) {
@@ -127,7 +127,7 @@ void AwoxMeshMqtt::publish_availability(Group *group) {
 
   const std::string message = group->online ? "online" : "offline";
   ESP_LOGI(TAG, "Publish online/offline for group %d - %s", group->group_id, message.c_str());
-  global_mqtt_client->publish(this->get_mqtt_topic_for_(group, "availability"), message, 0, true);
+  global_mqtt_client->publish(this->get_mqtt_topic_for_(group, "availability"), message, 2, true);
 }
 
 void AwoxMeshMqtt::publish_state(MeshDestination *mesh_destination) {
@@ -182,10 +182,10 @@ void AwoxMeshMqtt::publish_state(MeshDestination *mesh_destination) {
           color["g"] = mesh_destination->G;
           color["b"] = mesh_destination->B;
         },
-        0, true);
+        2, true);
   } else {
     global_mqtt_client->publish(this->get_mqtt_topic_for_(mesh_destination, "state"),
-                                mesh_destination->state ? "ON" : "OFF", mesh_destination->state ? 2 : 3, 0, true);
+                                mesh_destination->state ? "ON" : "OFF", mesh_destination->state ? 2 : 3, 2, true);
   }
 }
 
@@ -214,7 +214,7 @@ void AwoxMeshMqtt::publish_connection_sensor_discovery(const std::vector<MeshCon
           JsonObject device_info = root.createNestedObject(MQTT_DEVICE);
           device_info[MQTT_DEVICE_IDENTIFIERS] = get_mac_address();
         },
-        0, discovery_info.retain);
+        2, discovery_info.retain);
 
     global_mqtt_client->publish_json(
         discovery_info.prefix + "/sensor/" + sanitized_name + "/connection-" + std::to_string(i) + "-mesh-ids/config",
@@ -236,7 +236,7 @@ void AwoxMeshMqtt::publish_connection_sensor_discovery(const std::vector<MeshCon
           JsonObject device_info = root.createNestedObject(MQTT_DEVICE);
           device_info[MQTT_DEVICE_IDENTIFIERS] = get_mac_address();
         },
-        0, discovery_info.retain);
+        2, discovery_info.retain);
 
     global_mqtt_client->publish_json(
         discovery_info.prefix + "/sensor/" + sanitized_name + "/connection-" + std::to_string(i) + "-mesh-id/config",
@@ -258,7 +258,7 @@ void AwoxMeshMqtt::publish_connection_sensor_discovery(const std::vector<MeshCon
           JsonObject device_info = root.createNestedObject(MQTT_DEVICE);
           device_info[MQTT_DEVICE_IDENTIFIERS] = get_mac_address();
         },
-        0, discovery_info.retain);
+        2, discovery_info.retain);
 
     global_mqtt_client->publish_json(
         discovery_info.prefix + "/sensor/" + sanitized_name + "/connection-" + std::to_string(i) + "-mac/config",
@@ -280,7 +280,7 @@ void AwoxMeshMqtt::publish_connection_sensor_discovery(const std::vector<MeshCon
           JsonObject device_info = root.createNestedObject(MQTT_DEVICE);
           device_info[MQTT_DEVICE_IDENTIFIERS] = get_mac_address();
         },
-        0, discovery_info.retain);
+        2, discovery_info.retain);
 
     global_mqtt_client->publish_json(
         discovery_info.prefix + "/binary_sensor/" + sanitized_name + "/connection-" + std::to_string(i) +
@@ -305,7 +305,7 @@ void AwoxMeshMqtt::publish_connection_sensor_discovery(const std::vector<MeshCon
           JsonObject device_info = root.createNestedObject(MQTT_DEVICE);
           device_info[MQTT_DEVICE_IDENTIFIERS] = get_mac_address();
         },
-        0, discovery_info.retain);
+        2, discovery_info.retain);
   }
 }
 
@@ -405,12 +405,13 @@ void AwoxMeshMqtt::send_discovery(Device *device) {
         device_info["via_device"] = get_mac_address();
         // device_info["serial_number"] = "mesh-id: " + std::to_string(device->mesh_id);
       },
-      0, discovery_info.retain);
+      2, discovery_info.retain);
 
   if (device->device_info->has_feature(FEATURE_LIGHT_MODE)) {
     global_mqtt_client->subscribe_json(
         this->get_mqtt_topic_for_(device, "command"),
-        [this, device](const std::string &topic, JsonObject root) { this->process_incomming_command(device, root); });
+        [this, device](const std::string &topic, JsonObject root) { this->process_incomming_command(device, root); },
+        2);
   } else {
     global_mqtt_client->subscribe(this->get_mqtt_topic_for_(device, "command"),
                                   [this, device](const std::string &topic, const std::string &payload) {
@@ -432,7 +433,7 @@ void AwoxMeshMqtt::send_discovery(Device *device) {
                                       case PARSE_NONE:
                                         break;
                                     }
-                                  });
+                                  }, 2);
   }
   this->publish_availability(device);
 }
@@ -523,12 +524,13 @@ void AwoxMeshMqtt::send_group_discovery(Group *group) {
         device_info["via_device"] = get_mac_address();
         // device_info["serial_number"] = "group-id: " + std::to_string(group->group_id);
       },
-      0, discovery_info.retain);
+      2, discovery_info.retain);
 
   if (group->device_info->has_feature(FEATURE_LIGHT_MODE)) {
     global_mqtt_client->subscribe_json(
         this->get_mqtt_topic_for_(group, "command"),
-        [this, group](const std::string &topic, JsonObject root) { this->process_incomming_command(group, root); });
+        [this, group](const std::string &topic, JsonObject root) { this->process_incomming_command(group, root); },
+        2);
   } else {
     ESP_LOGE(TAG, "Non light group isn't supported currently");
   }
