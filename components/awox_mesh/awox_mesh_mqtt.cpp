@@ -33,16 +33,9 @@ static std::string get_product_code_as_hex_string(int product_id) {
 }
 
 void AwoxMeshMqtt::setup() {
-  // Use retained MQTT messages to publish a default offline status for all devices
-  global_mqtt_client->subscribe(
-      global_mqtt_client->get_topic_prefix() + "/#", [this](const std::string &topic, const std::string &payload) {
-        if (std::regex_match(topic, std::regex(global_mqtt_client->get_topic_prefix() + "/[0-9]+/availability"))) {
-          ESP_LOGD(TAG, "Received topic: %s, %s", topic.c_str(), payload.c_str());
-          if (payload == "online") {
-            global_mqtt_client->publish(topic.c_str(), "offline");
-          }
-        }
-      });
+  // NOTE: Removed the problematic subscription that published "offline" on "online" messages.
+  // This caused MQTT receive-maximum quota issues due to message storms.
+  // HA automations or ESPHome's own availability mechanism should handle offline detection.
 }
 
 std::string AwoxMeshMqtt::get_discovery_topic_(const MQTTDiscoveryInfo &discovery_info, Device *device) const {
