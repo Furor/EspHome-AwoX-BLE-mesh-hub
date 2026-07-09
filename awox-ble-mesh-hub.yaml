@@ -60,7 +60,10 @@ external_components:
 
 esp32_ble_tracker:
   scan_parameters:
-    active: false
+    active: true
+    duration: 300ms  # Short scan duration for quicker cycle
+    interval: 320ms  # Slightly longer than duration to allow for processing
+    # filter_by_address: true  # Optional: only track known AwoX devices
 
 awox_mesh:
   mesh_name: !secret mesh_name

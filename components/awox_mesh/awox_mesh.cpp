@@ -13,6 +13,8 @@ namespace awox_mesh {
 
 static const char *const TAG = "awox.mesh";
 static const int RSSI_NOT_AVAILABLE = -9999;
+static const uint32_t DEVICE_NOT_FOUND_TIMEOUT = 10000;  // 10s instead of 20s for fresher device list
+static const uint32_t BLE_SCAN_RESTART_DELAY = 100;       // 100ms delay before restart
 
 static bool id_in_vector(int mesh_id, const std::vector<int> &vector) {
   std::vector<int>::const_iterator position = std::find(vector.begin(), vector.end(), mesh_id);
@@ -120,34 +122,54 @@ void AwoxMesh::loop() {
   const uint32_t now = esphome::millis();
   const uint32_t since_last_attempt = now - this->last_connection_attempt;
 
-  if ((!this->has_active_connection && since_last_attempt > 5000) || since_last_attempt > 20000) {
+  // When no active connection, try to reconnect more aggressively (3s interval)
+  // When connection exists, only check for new connections less frequently (15s)
+  const uint32_t no_connection_retry_interval = 3000;
+  const uint32_t with_connection_check_interval = 15000;
+  const uint32_t max_interval = 20000;
+
+  const uint32_t current_interval = this->has_active_connection ? min(with_connection_check_interval, max_interval)
+                                                                : min(no_connection_retry_interval, max_interval);
+
+  if (since_last_attempt > current_interval) {
     this->last_connection_attempt = now;
 
     this->disconnect_connections_with_overlapping_mesh_ids();
 
     for (auto *connection : this->connections_) {
-      if (connection->get_address() == 0) {
-        auto *found_device = this->next_to_connect();
+      // Skip connections that are already occupied
+      // Check if connection is available (address == 0 and state is INIT, IDLE, or DISCONNECTING)
+      auto state = connection->get_state();
+      if (connection->get_address() != 0 &&
+          (state == esp32_ble_tracker::ClientState::SEARCHING ||
+           state == esp32_ble_tracker::ClientState::CONNECTING ||
+           state == esp32_ble_tracker::ClientState::DISCOVERED ||
+           state == esp32_ble_tracker::ClientState::READY_TO_CONNECT ||
+           state == esp32_ble_tracker::ClientState::ESTABLISHED ||
+           state == esp32_ble_tracker::ClientState::CONNECTED)) {
+        continue;
+      }
 
-        if (found_device == nullptr) {
-          ESP_LOGD(TAG, "No devices found to connect to");
-          break;
-        }
+      auto *found_device = this->next_to_connect();
 
-        if (found_device->connected) {
-          ESP_LOGI(TAG, "Skipped to connect %s => rssi: %d already connected!!",
-                   found_device->device.address_str().c_str(), (int) found_device->rssi);
-          break;
-        }
-
-        ESP_LOGI(TAG, "Try to connect %s => rssi: %d", found_device->device.address_str().c_str(),
-                 (int) found_device->rssi);
-
-        connection->connect_to(found_device);
-
-        // max 1 new connection per loop()
+      if (found_device == nullptr) {
+        ESP_LOGD(TAG, "No devices found to connect to");
         break;
       }
+
+      if (found_device->connected) {
+        ESP_LOGI(TAG, "Skipped to connect %s => rssi: %d already connected!!",
+                 found_device->device.address_str().c_str(), (int) found_device->rssi);
+        break;
+      }
+
+      ESP_LOGI(TAG, "Try to connect %s => rssi: %d", found_device->device.address_str().c_str(),
+               (int) found_device->rssi);
+
+      connection->connect_to(found_device);
+
+      // max 1 new connection per loop()
+      break;
     }
   }
 
@@ -180,7 +202,8 @@ void AwoxMesh::loop() {
     }
   }
 
-  if (now - this->last_found_device_cleanup < 20000) {
+  // Run RSSI cleanup more frequently (every 5 seconds) since we reduced the timeout
+  if (now - this->last_found_device_cleanup > DEVICE_NOT_FOUND_TIMEOUT / 2) {
     this->set_rssi_for_devices_that_are_not_available();
   }
 }
@@ -223,6 +246,8 @@ void AwoxMesh::sort_devices() {
 }
 
 FoundDevice *AwoxMesh::next_to_connect() {
+  const uint32_t now = esphome::millis();
+
   for (auto *found_device : this->found_devices_) {
     if (found_device->mesh_id == 0) {
       Device *device = this->get_device(found_device->device.address_uint64());
@@ -235,8 +260,8 @@ FoundDevice *AwoxMesh::next_to_connect() {
 
   ESP_LOGD(TAG, "Total devices: %d", this->found_devices_.size());
   for (auto *found_device : this->found_devices_) {
-    ESP_LOGD(TAG, "Available device %s [%u] => rssi: %d", found_device->device.address_str().c_str(),
-             found_device->mesh_id, (int) found_device->rssi);
+    ESP_LOGD(TAG, "Available device %s [%u] => rssi: %d, last_seen: %lumS ago", found_device->device.address_str().c_str(),
+             found_device->mesh_id, (int) found_device->rssi, (now - found_device->last_detected) / 1000);
   }
 
   std::vector<int> linked_mesh_ids;
@@ -263,32 +288,62 @@ FoundDevice *AwoxMesh::next_to_connect() {
       "Currently %d mesh devices reachable through active connections (%d currently known and %d fully recognized)",
       linked_mesh_ids.size(), known_mesh_devices, identified_mesh_devices);
 
+  // First pass: find recently seen devices (seen within last 15 seconds) with valid RSSI
+  // This ensures we prefer devices we've actually heard from recently
+  const uint32_t recent_device_timeout = 15000;
   for (auto *found_device : this->found_devices_) {
     if (!found_device->connected && found_device->rssi >= this->minimum_rssi) {
-      // unknown mesh_id then the device is definitly not in reach of our current connection
+      bool recently_seen = (now - found_device->last_detected) < recent_device_timeout;
+      if (!recently_seen) {
+        ESP_LOGV(TAG, "Skipping stale device %s [%u] - last seen %lumS ago",
+                 found_device->device.address_str().c_str(), found_device->mesh_id,
+                 (now - found_device->last_detected) / 1000);
+        continue;
+      }
+      // unknown mesh_id then the device is definitely not in reach of our current connection
       if (found_device->mesh_id == 0) {
-        ESP_LOGD(TAG, "Try to connecty to device %s no mesh id known yet", found_device->device.address_str().c_str());
+        ESP_LOGD(TAG, "Try to connect to device %s no mesh id known yet (recently seen: %lumS ago)",
+                 found_device->device.address_str().c_str(), (now - found_device->last_detected) / 1000);
         return found_device;
       }
       // No active connection for found device
       if (!id_in_vector(found_device->mesh_id, linked_mesh_ids)) {
-        ESP_LOGD(TAG, "Try to connecty to device %s [%u] no active connection found for this device",
-                 found_device->device.address_str().c_str(), found_device->mesh_id);
+        ESP_LOGD(TAG, "Try to connect to device %s [%u] no active connection found (recently seen: %lumS ago)",
+                 found_device->device.address_str().c_str(), found_device->mesh_id,
+                 (now - found_device->last_detected) / 1000);
         return found_device;
       }
+    }
+  }
+
+  // Second pass: fallback to any device with valid RSSI if no recently seen devices found
+  ESP_LOGW(TAG, "No recently seen devices found, falling back to all available devices");
+  for (auto *found_device : this->found_devices_) {
+    if (!found_device->connected && found_device->rssi >= this->minimum_rssi &&
+        found_device->rssi != RSSI_NOT_AVAILABLE) {
+      ESP_LOGW(TAG, "Fallback: trying device %s [%u] => rssi: %d", found_device->device.address_str().c_str(),
+               found_device->mesh_id, (int) found_device->rssi);
+      return found_device;
     }
   }
 
   return nullptr;
 }
 
+void AwoxMesh::on_scan_end() {
+  ESP_LOGD(TAG, "BLE scan ended, restarting scan to ensure continuous device discovery");
+  // Restart the BLE scan immediately to ensure we always have fresh device data
+  // This is critical for maintaining stable connections as devices may move in/out of range
+  this->start_scan();
+}
+
 void AwoxMesh::set_rssi_for_devices_that_are_not_available() {
   this->last_found_device_cleanup = esphome::millis();
   for (auto *found_device : this->found_devices_) {
     if (found_device->rssi > RSSI_NOT_AVAILABLE &&
-        this->last_found_device_cleanup - found_device->last_detected > 20000) {
-      ESP_LOGD(TAG, "Clear RSSI for %s [%u] not found the last 20 seconds", found_device->device.address_str().c_str(),
-               found_device->mesh_id);
+        this->last_found_device_cleanup - found_device->last_detected > DEVICE_NOT_FOUND_TIMEOUT) {
+      ESP_LOGD(TAG, "Clear RSSI for %s [%u] not found the last %lu seconds", found_device->device.address_str().c_str(),
+               found_device->mesh_id, DEVICE_NOT_FOUND_TIMEOUT / 1000);
       found_device->rssi = RSSI_NOT_AVAILABLE;
     }
   }

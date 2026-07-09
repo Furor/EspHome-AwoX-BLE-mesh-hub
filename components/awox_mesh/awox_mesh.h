@@ -116,7 +116,7 @@ class AwoxMesh : public esp32_ble_tracker::ESPBTDeviceListener, public Component
 
   bool parse_device(const esp32_ble_tracker::ESPBTDevice &device) override;
 
-  void on_scan_end() override { ESP_LOGD("awox.mesh", "scan end"); }
+  void on_scan_end() override;
 
   void register_connection(MeshConnection *connection);
 

@@ -135,10 +135,15 @@ bool MeshConnection::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if
 
   switch (event) {
     case ESP_GATTC_DISCONNECT_EVT: {
-      ESP_LOGD(TAG, "[%u] [%s] ESP_GATTC_DISCONNECT_EVT, reason %d", this->connection_index_,
+      ESP_LOGW(TAG, "[%u] [%s] ESP_GATTC_DISCONNECT_EVT, reason %d", this->connection_index_,
                this->address_str_.c_str(), param->disconnect.reason);
-      if (param->disconnect.reason > 0) {
-        this->set_address(0);
+      // Always clean up on disconnect, not just on error codes
+      // This ensures we can reconnect to another device
+      this->set_address(0);
+      // Mark the found_device as disconnected so it can be selected for a new connection
+      if (this->found_device) {
+        this->found_device->connected = false;
+        ESP_LOGD(TAG, "Marked device %s as disconnected", this->found_device->device.address_str().c_str());
       }
       break;
     }
