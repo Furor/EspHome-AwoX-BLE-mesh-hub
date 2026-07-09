@@ -64,6 +64,21 @@ class MeshConnection : public esp32_ble_client::BLEClientBase {
   uint32_t last_send_command = 0;
   uint32_t command_debounce_time = 180;
 
+  /**
+   * Connection established timestamp for stabilization delay
+   */
+  uint32_t connection_established_time = 0;
+
+  /**
+   * Timestamp of last status request to prevent rapid re-requests
+   */
+  uint32_t last_status_request = 0;
+
+  /**
+   * Flag to track if devices have been marked offline (to prevent re-marking)
+   */
+  bool devices_marked_offline = false;
+
   std::deque<QueuedCommand> command_queue{};
 
   std::function<void()> disconnect_callback;
@@ -165,6 +180,12 @@ class MeshConnection : public esp32_ble_client::BLEClientBase {
   bool write_command(int command, const std::string &data, int dest = 0, bool withResponse = false);
 
   void request_status();
+
+  /**
+   * Request status with connection stabilization delay.
+   * Waits for connection_estabilization_delay before requesting to avoid flickering.
+   */
+  void request_status_stabilized();
 
   void set_power(int dest, bool state);
 

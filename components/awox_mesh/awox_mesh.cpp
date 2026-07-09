@@ -42,8 +42,9 @@ void AwoxMesh::register_connection(MeshConnection *connection) {
   connection->mesh_ = this;
 
   connection->set_disconnect_callback([this]() {
-    ESP_LOGI(TAG, "disconnected");
-
+    ESP_LOGI(TAG, "disconnected - setting cooldown period");
+    // Record disconnect time for cooldown and delayed offline marking
+    this->last_disconnect_time = esphome::millis();
     this->publish_connected();
   });
 }
@@ -195,6 +196,9 @@ void AwoxMesh::loop() {
                publish.online ? "Online" : "Offline", publish.device->online ? "Online" : "Offline");
     }
   }
+
+  // Process delayed offline publish queue - wait for offline_delay before marking offline
+  this->process_delayed_offline_publish();
 
   for (Group *group : this->mesh_groups_) {
     if (!group->send_discovery && group->device_info != nullptr) {
@@ -480,6 +484,75 @@ void AwoxMesh::publish_availability(Device *device, bool delayed) {
 
   for (Group *group : device->get_groups()) {
     this->publish_connection->publish_availability(group);
+  }
+}
+
+void AwoxMesh::schedule_offline_delay(Device *device) {
+  if (device == nullptr) {
+    return;
+  }
+
+  // Check if this device is already in the delayed offline queue
+  for (const auto &entry : this->delayed_offline_publish) {
+    if (entry.device == device) {
+      // Already queued, don't add duplicate
+      return;
+    }
+  }
+
+  PublishOnlineStatus publish = {};
+  publish.device = device;
+  publish.online = false;
+  publish.time = esphome::millis();
+  this->delayed_offline_publish.push_back(publish);
+  ESP_LOGD(TAG, "Scheduled offline announcement for %u - %s after %lu ms delay", device->mesh_id,
+           device->online ? "online" : "offline", this->offline_delay);
+}
+
+void AwoxMesh::process_delayed_offline_publish() {
+  while (!this->delayed_offline_publish.empty()) {
+    PublishOnlineStatus &publish = this->delayed_offline_publish.front();
+
+    // Check if the offline delay has expired
+    if (esphome::millis() - publish.time < this->offline_delay) {
+      break;
+    }
+
+    // Check if device has come back online during the delay
+    if (publish.device->online) {
+      ESP_LOGD(TAG, "Device %u came back online during offline delay, cancelling offline announcement",
+               publish.device->mesh_id);
+      this->delayed_offline_publish.pop_front();
+      continue;
+    }
+
+    // Check if device is now reachable through another connection
+    // Look for any active connection that covers this device's mesh_id
+    bool reachable = false;
+    for (auto *connection : this->connections_) {
+      if (connection->connected()) {
+        for (int mesh_id : connection->get_linked_mesh_ids()) {
+          if (mesh_id == publish.device->mesh_id) {
+            reachable = true;
+            ESP_LOGD(TAG, "Device %u is still reachable through another connection, cancelling offline announcement",
+                     publish.device->mesh_id);
+            break;
+          }
+        }
+        if (reachable) break;
+      }
+    }
+
+    if (reachable) {
+      this->delayed_offline_publish.pop_front();
+      continue;
+    }
+
+    // Publish the offline status
+    PublishOnlineStatus publish_copy = this->delayed_offline_publish.front();
+    this->delayed_offline_publish.pop_front();
+    this->publish_availability(publish_copy.device, false);
+    ESP_LOGD(TAG, "Published offline status for %u after delay", publish_copy.device->mesh_id);
   }
 }
 

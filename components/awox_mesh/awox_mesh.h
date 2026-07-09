@@ -39,17 +39,63 @@ struct FoundDevice {
 };
 
 class AwoxMesh : public esp32_ble_tracker::ESPBTDeviceListener, public Component {
+  /**
+   * Start time for startup delay
+   */
   uint32_t start;
 
+  /**
+   * Whether the module is ready to attempt connections (after startup delay)
+   */
   bool ready_to_connect = false;
 
+  /**
+   * Whether we currently have at least one active connection
+   */
   bool has_active_connection = false;
 
+  /**
+   * Timestamp of last connection attempt
+   */
   uint32_t last_connection_attempt = 0;
 
+  /**
+   * Timestamp of last device cleanup run
+   */
   uint32_t last_found_device_cleanup = 0;
 
+  /**
+   * Minimum RSSI threshold for connection candidates
+   */
   int minimum_rssi = -90;
+
+  /**
+   * Delay after connection establishment before publishing state (5 seconds)
+   * This prevents flickering when connection is briefly unstable
+   */
+  uint32_t connection_stabilization_delay = 5000;
+
+  /**
+   * Delay before marking devices as offline when connection is lost (8 seconds)
+   * This gives time for reconnection or handover to another connection
+   */
+  uint32_t offline_delay = 8000;
+
+  /**
+   * Delay after any disconnect before attempting reconnection (3 seconds)
+   * This prevents rapid reconnect cycles
+   */
+  uint32_t reconnect_cooldown = 3000;
+
+  /**
+   * Timestamp when the last disconnect happened
+   */
+  uint32_t last_disconnect_time = 0;
+
+  /**
+   * Timestamp when the last stable connection was established
+   */
+  uint32_t last_stable_connection_time = 0;
 
   std::string mesh_name = "";
 
@@ -62,6 +108,22 @@ class AwoxMesh : public esp32_ble_tracker::ESPBTDeviceListener, public Component
   DeviceInfoResolver *device_info_resolver = new DeviceInfoResolver();
 
   std::deque<PublishOnlineStatus> delayed_availability_publish{};
+
+  /**
+   * Queue for delayed offline announcements (to prevent flickering)
+   */
+  std::deque<PublishOnlineStatus> delayed_offline_publish{};
+
+  /**
+   * Schedule a device to be marked offline after a delay.
+   * This prevents flickering when connections are briefly unstable.
+   */
+  void schedule_offline_delay(Device *device);
+
+  /**
+   * Process delayed offline publish queue and publish offline statuses when delays expire.
+   */
+  void process_delayed_offline_publish();
 
   bool start_up_delay_done();
 

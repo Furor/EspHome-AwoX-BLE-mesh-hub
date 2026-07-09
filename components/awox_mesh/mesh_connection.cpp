@@ -53,6 +53,8 @@ void MeshConnection::connect_to(FoundDevice *found_device) {
   this->set_state(esp32_ble_tracker::ClientState::SEARCHING);
   this->found_device = found_device;
   this->found_device->connected = true;
+  this->connection_established_time = 0;  // Reset stabilization timer
+  this->devices_marked_offline = false;
 
   this->set_auto_connect(true);
   this->parse_device(found_device->device);
@@ -67,14 +69,21 @@ void MeshConnection::set_address(uint64_t address) {
   }
 
   if (address == 0) {
+    // Track that devices need to be marked offline, but don't do it immediately
+    // This allows the AwoxMesh layer to apply stabilization delays
+    this->devices_marked_offline = false;
     this->disconnect_callback();
-
-    // Mark each linked mesh device as offline
+    // NOTE: We no longer immediately mark devices offline here.
+    // The AwoxMesh class handles delayed offline marking to prevent flickering.
+  } else {
+    // When connecting to a new device, mark old devices as offline
+    // but let the mesh layer handle the actual publishing with proper delays
     for (int mesh_id : this->linked_mesh_ids_) {
       Device *device = this->mesh_->get_device(mesh_id);
-      if (device != nullptr) {
+      if (device != nullptr && device->online) {
+        // Mark as offline internally but let mesh layer handle delayed publish
         device->online = false;
-        this->mesh_->publish_availability(device, true);
+        this->mesh_->schedule_offline_delay(device);
       }
     }
   }
@@ -100,6 +109,19 @@ void MeshConnection::set_address(uint64_t address) {
 
 void MeshConnection::loop() {
   esp32_ble_client::BLEClientBase::loop();
+
+  // Periodically request status updates for connected devices to keep state fresh
+  // This uses the stabilized version to avoid rapid re-requests after connection drops
+  if (this->connected() && this->linked_mesh_ids_.size() > 0) {
+    uint32_t now = esphome::millis();
+    if (this->connection_established_time > 0 &&
+        now - this->connection_established_time > 30000 &&  // Only after 30s
+        now - this->last_status_request > 60000) {         // Every 60s
+      ESP_LOGD(TAG, "[%u] [%s] Periodic status refresh", this->get_conn_id(), this->address_str_.c_str());
+      this->last_status_request = now;
+      this->write_command(C_REQUEST_STATUS, {0x10}, 0xffff);
+    }
+  }
 
   if (this->connected() && !this->command_queue.empty() &&
       this->last_send_command < esphome::millis() - this->command_debounce_time) {
@@ -185,12 +207,14 @@ bool MeshConnection::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if
           ESP_LOGI(TAG, "Response OK, let's go");
           this->generate_session_key(this->random_key,
                                      std::string((char *) param->read.value, param->read.value_len).substr(1, 9));
-
+  
           ESP_LOGI(TAG, "[%u] [%s] session key %s", this->get_conn_id(), this->address_str_.c_str(),
                    string_as_binary_string(this->session_key).c_str());
-
-          this->request_status();
-
+  
+          // Start stabilization timer before requesting status
+          this->connection_established_time = esphome::millis();
+          this->request_status_stabilized();
+  
           break;
         } else if (param->read.value[0] == 0xe) {
           ESP_LOGE(TAG, "Device authentication error: known mesh credentials are not excepted by the device. Did you "
@@ -585,6 +609,41 @@ void MeshConnection::request_status() {
     ESP_LOGD(TAG, "[%u] [%s] request status update", this->get_conn_id(), this->address_str_.c_str());
     this->write_command(C_REQUEST_STATUS, {0x10}, 0xffff);
   }
+}
+
+void MeshConnection::request_status_stabilized() {
+  if (!this->connected()) {
+    ESP_LOGW(TAG, "[%u] [%s] Cannot request status - not connected", this->get_conn_id(), this->address_str_.c_str());
+    return;
+  }
+
+  // Check if enough time has passed since connection was established
+  uint32_t now = esphome::millis();
+  if (this->connection_established_time == 0) {
+    this->connection_established_time = now;
+  }
+
+  uint32_t elapsed = now - this->connection_established_time;
+  uint32_t stabilization_delay = 2000;  // 2 second stabilization delay for status request
+
+  if (elapsed < stabilization_delay) {
+    ESP_LOGD(TAG, "[%u] [%s] Waiting %lu ms for connection stabilization before requesting status (elapsed: %lu ms)",
+             this->get_conn_id(), this->address_str_.c_str(),
+             stabilization_delay - elapsed, elapsed);
+    return;
+  }
+
+  // Check if we've already requested status recently to prevent duplicate requests
+  if (this->last_status_request > 0 && now - this->last_status_request < 5000) {  // Minimum 5 seconds between status requests
+    ESP_LOGD(TAG, "[%u] [%s] Skipping status request - too soon since last request (%lu ms ago)",
+             this->get_conn_id(), this->address_str_.c_str(), now - this->last_status_request);
+    return;
+  }
+
+  this->last_status_request = now;
+  ESP_LOGD(TAG, "[%u] [%s] Requesting status update after stabilization (%lu ms)",
+           this->get_conn_id(), this->address_str_.c_str(), elapsed);
+  this->write_command(C_REQUEST_STATUS, {0x10}, 0xffff);
 }
 
 void MeshConnection::set_power(int dest, bool state) { this->queue_command(C_POWER, {state, 0, 0}, dest); }
